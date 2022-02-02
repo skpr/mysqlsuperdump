@@ -12,6 +12,10 @@ import (
 // ExtendedInsertDefaultRowCount: Default rows that will be dumped by each INSERT statement
 const (
 	ExtendedInsertDefaultRowCount = 100
+	// OperationIgnore is used to skip a table when dumping.
+	OperationIgnore = "ignore"
+	// OperationNoData is used when you want to dump a table structure without the data.
+	OperationNoData = "nodata"
 )
 
 type mySQL struct {
@@ -151,6 +155,7 @@ func (d *mySQL) DumpUnlockTables(w io.Writer) {
 	fmt.Fprintln(w, "UNLOCK TABLES;")
 }
 
+// Helper function to get all data for a table.
 func (d *mySQL) selectAllDataFor(table string) (rows *sql.Rows, columns []string, err error) {
 	var selectQuery string
 	if selectQuery, err = d.GetSelectQueryFor(table); err != nil {
@@ -165,37 +170,47 @@ func (d *mySQL) selectAllDataFor(table string) (rows *sql.Rows, columns []string
 	return
 }
 
-// Get the table data
-func (d *mySQL) DumpTableData(w io.Writer, table string) (err error) {
+// DumpTableData for a specific table.
+func (d *mySQL) DumpTableData(w io.Writer, table string) error {
 	d.Log.Println("Dumping data for table", table)
+
 	rows, columns, err := d.selectAllDataFor(table)
 	if err != nil {
-		return
+		return err
 	}
+
 	defer rows.Close()
 
 	values := make([]*sql.RawBytes, len(columns))
 	scanArgs := make([]interface{}, len(values))
+
 	for i := range values {
 		scanArgs[i] = &values[i]
 	}
 
 	query := fmt.Sprintf("INSERT INTO `%s` VALUES", table)
+
 	var data []string
+
 	for rows.Next() {
 		if err = rows.Scan(scanArgs...); err != nil {
 			return err
 		}
+
 		var vals []string
+
 		for _, col := range values {
 			val := "NULL"
+
 			if col != nil {
 				val = fmt.Sprintf("'%s'", escape(string(*col)))
 			}
+
 			vals = append(vals, val)
 		}
 
 		data = append(data, fmt.Sprintf("( %s )", strings.Join(vals, ", ")))
+
 		if len(data) >= d.ExtendedInsertRows {
 			fmt.Fprintf(w, "%s\n%s;\n", query, strings.Join(data, ",\n"))
 			data = make([]string, 0)
@@ -206,36 +221,42 @@ func (d *mySQL) DumpTableData(w io.Writer, table string) (err error) {
 		fmt.Fprintf(w, "%s\n%s;\n", query, strings.Join(data, ",\n"))
 	}
 
-	return
+	return nil
 }
 
-func (d *mySQL) Dump(w io.Writer) (err error) {
+// Dump all tables using rules.
+func (d *mySQL) Dump(w io.Writer) error {
 	fmt.Fprintf(w, "SET NAMES utf8;\n")
 	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 0;\n")
 
 	d.Log.Println("Getting table list...")
 	tables, err := d.GetTables()
 	if err != nil {
-		return
+		return err
 	}
-	
+
 	for _, table := range tables {
-		if d.FilterMap[strings.ToLower(table)] != "ignore" {
-			skipData := d.FilterMap[strings.ToLower(table)] == "nodata"
+		if d.FilterMap[strings.ToLower(table)] != OperationIgnore {
+			skipData := d.FilterMap[strings.ToLower(table)] == OperationNoData
 			if !skipData && d.UseTableLock {
 				d.LockTableReading(table)
 				d.FlushTable(table)
 			}
+
 			d.DumpCreateTable(w, table)
+
 			if !skipData {
 				cnt, err := d.DumpTableHeader(w, table)
 				if err != nil {
 					return err
 				}
+
 				if cnt > 0 {
 					d.DumpTableLockWrite(w, table)
 					d.DumpTableData(w, table)
+
 					fmt.Fprintln(w)
+
 					d.DumpUnlockTables(w)
 					if d.UseTableLock {
 						d.UnlockTables()
@@ -246,5 +267,47 @@ func (d *mySQL) Dump(w io.Writer) (err error) {
 	}
 
 	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 1;\n")
-	return
+
+	return nil
+}
+
+// DumpTable while still adhering to the rules.
+func (d *mySQL) DumpTable(w io.Writer, table string) error {
+	if d.FilterMap[strings.ToLower(table)] == OperationIgnore {
+		return nil
+	}
+
+	fmt.Fprintf(w, "SET NAMES utf8;\n")
+	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 0;\n")
+
+	skipData := d.FilterMap[strings.ToLower(table)] == OperationNoData
+	if !skipData && d.UseTableLock {
+		d.LockTableReading(table)
+		d.FlushTable(table)
+	}
+
+	d.DumpCreateTable(w, table)
+
+	if !skipData {
+		cnt, err := d.DumpTableHeader(w, table)
+		if err != nil {
+			return err
+		}
+
+		if cnt > 0 {
+			d.DumpTableLockWrite(w, table)
+			d.DumpTableData(w, table)
+
+			fmt.Fprintln(w)
+
+			d.DumpUnlockTables(w)
+			if d.UseTableLock {
+				d.UnlockTables()
+			}
+		}
+	}
+
+	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 1;\n")
+
+	return nil
 }

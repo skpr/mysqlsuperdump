@@ -4,96 +4,114 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"strings"
 )
 
 // ExtendedInsertDefaultRowCount: Default rows that will be dumped by each INSERT statement
 const (
-	ExtendedInsertDefaultRowCount = 100
+	// OperationIgnore is used to skip a table when dumping.
+	OperationIgnore = "ignore"
+	// OperationNoData is used when you want to dump a table structure without the data.
+	OperationNoData = "nodata"
+
+	// DefaultExtendedInsertRows is used when a value is not provided.
+	DefaultExtendedInsertRows = 100
 )
 
-type mySQL struct {
+// Client used for dumping a database and/or table.
+type Client struct {
 	DB                 *sql.DB
 	SelectMap          map[string]map[string]string
 	WhereMap           map[string]string
 	FilterMap          map[string]string
 	UseTableLock       bool
-	Log                *log.Logger
 	ExtendedInsertRows int
 }
 
 // NewMySQLDumper is the constructor
-func NewMySQLDumper(db *sql.DB, logger *log.Logger) *mySQL {
-	if logger == nil {
-		logger = log.New(ioutil.Discard, "", 0)
+func NewMySQLDumper(db *sql.DB) *Client {
+	return &Client{
+		DB:                 db,
+		ExtendedInsertRows: DefaultExtendedInsertRows,
 	}
-	return &mySQL{DB: db, Log: logger, ExtendedInsertRows: ExtendedInsertDefaultRowCount}
 }
 
-// Lock the table (read only)
-func (d *mySQL) LockTableReading(table string) (sql.Result, error) {
-	d.Log.Println("Locking table", table, "for reading")
+// LockTableReading explicitly acquires table locks for the current client session.
+func (d *Client) LockTableReading(table string) (sql.Result, error) {
 	return d.DB.Exec(fmt.Sprintf("LOCK TABLES `%s` READ", table))
 }
 
-// Flush table to ensure that the all active index pages are written to disk
-func (d *mySQL) FlushTable(table string) (sql.Result, error) {
-	d.Log.Println("Flushing table", table)
+// FlushTable will force a tables to be closed.
+func (d *Client) FlushTable(table string) (sql.Result, error) {
 	return d.DB.Exec(fmt.Sprintf("FLUSH TABLES `%s`", table))
 }
 
-// Release the global read locks
-func (d *mySQL) UnlockTables() (sql.Result, error) {
-	d.Log.Println("Unlocking tables")
-	return d.DB.Exec(fmt.Sprintf("UNLOCK TABLES"))
+// UnlockTables explicitly releases any table locks held by the current session.
+func (d *Client) UnlockTables() (sql.Result, error) {
+	return d.DB.Exec("UNLOCK TABLES")
 }
 
-// Get list of existing tables in database
-func (d *mySQL) GetTables() (tables []string, err error) {
-	tables = make([]string, 0)
-	var rows *sql.Rows
-	if rows, err = d.DB.Query("SHOW FULL TABLES"); err != nil {
-		return
+// GetTables will return a list of tables.
+func (d *Client) GetTables() ([]string, error) {
+	tables := make([]string, 0)
+
+	rows, err := d.DB.Query("SHOW FULL TABLES")
+	if err != nil {
+		return tables, err
 	}
+
 	defer rows.Close()
+
 	for rows.Next() {
 		var tableName, tableType string
-		if err = rows.Scan(&tableName, &tableType); err != nil {
-			return
+
+		err := rows.Scan(&tableName, &tableType)
+		if err != nil {
+			return tables, err
 		}
+
 		if tableType == "BASE TABLE" {
 			tables = append(tables, tableName)
 		}
 	}
-	return
+
+	return tables, nil
 }
 
-// Dump the script to create the table
-func (d *mySQL) DumpCreateTable(w io.Writer, table string) error {
-	d.Log.Println("Dumping structure for table", table)
+// WriteCreateTable script used when dumping a database.
+func (d *Client) WriteCreateTable(w io.Writer, table string) error {
 	fmt.Fprintf(w, "\n--\n-- Structure for table `%s`\n--\n\n", table)
 	fmt.Fprintf(w, "DROP TABLE IF EXISTS `%s`;\n", table)
+
 	row := d.DB.QueryRow(fmt.Sprintf("SHOW CREATE TABLE `%s`", table))
-	var tname, ddl string
-	if err := row.Scan(&tname, &ddl); err != nil {
+
+	var name, ddl string
+
+	if err := row.Scan(&name, &ddl); err != nil {
 		return err
 	}
+
 	fmt.Fprintf(w, "%s;\n", ddl)
+
 	return nil
 }
 
-// Get the column list for the SELECT, applying the select map from config file.
-func (d *mySQL) GetColumnsForSelect(table string) (columns []string, err error) {
+// GetColumnsForSelect for applying the select map from config.
+func (d *Client) GetColumnsForSelect(table string) ([]string, error) {
 	var rows *sql.Rows
-	if rows, err = d.DB.Query(fmt.Sprintf("SELECT * FROM `%s` LIMIT 1", table)); err != nil {
-		return
+
+	rows, err := d.DB.Query(fmt.Sprintf("SELECT * FROM `%s` LIMIT 1", table))
+	if err != nil {
+		return nil, err
 	}
+
 	defer rows.Close()
-	if columns, err = rows.Columns(); err != nil {
-		return
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
 	}
+
 	for k, column := range columns {
 		replacement, ok := d.SelectMap[strings.ToLower(table)][strings.ToLower(column)]
 		if ok {
@@ -102,100 +120,133 @@ func (d *mySQL) GetColumnsForSelect(table string) (columns []string, err error) 
 			columns[k] = fmt.Sprintf("`%s`", column)
 		}
 	}
-	return
+
+	return columns, nil
 }
 
-// Get the complete SELECT query to fetch data from database
-func (d *mySQL) GetSelectQueryFor(table string) (query string, err error) {
+// GetSelectQueryForTable will return a complete SELECT query to fetch data from a table.
+func (d *Client) GetSelectQueryForTable(table string) (string, error) {
 	cols, err := d.GetColumnsForSelect(table)
 	if err != nil {
 		return "", err
 	}
-	query = fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(cols, ", "), table)
+
+	query := fmt.Sprintf("SELECT %s FROM `%s`", strings.Join(cols, ", "), table)
+
 	if where, ok := d.WhereMap[strings.ToLower(table)]; ok {
 		query = fmt.Sprintf("%s WHERE %s", query, where)
 	}
-	return
+
+	return query, nil
 }
 
-// Get the number of rows the select will return
-func (d *mySQL) GetRowCount(table string) (count uint64, err error) {
+// GetRowCountForTable will return the number of rows using a SELECT statement.
+func (d *Client) GetRowCountForTable(table string) (uint64, error) {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)
+
 	if where, ok := d.WhereMap[strings.ToLower(table)]; ok {
 		query = fmt.Sprintf("%s WHERE %s", query, where)
 	}
+
 	row := d.DB.QueryRow(query)
-	if err = row.Scan(&count); err != nil {
-		return
+
+	var count uint64
+
+	err := row.Scan(&count)
+	if err != nil {
+		return count, err
 	}
-	return
+
+	return count, nil
 }
 
-// Dump comments including table name and row count to w
-func (d *mySQL) DumpTableHeader(w io.Writer, table string) (count uint64, err error) {
-	fmt.Fprintf(w, "\n--\n-- Data for table `%s`", table)
-	if count, err = d.GetRowCount(table); err != nil {
-		return
-	}
-	fmt.Fprintf(w, " -- %d rows\n--\n\n", count)
-	return
-}
-
-// Write the query to lock writes in the specified table
-func (d *mySQL) DumpTableLockWrite(w io.Writer, table string) {
+// WriteTableLockWrite to be used for a dump script.
+func (d *Client) WriteTableLockWrite(w io.Writer, table string) {
 	fmt.Fprintf(w, "LOCK TABLES `%s` WRITE;\n", table)
 }
 
-// Write the query to unlock tables
-func (d *mySQL) DumpUnlockTables(w io.Writer) {
+// WriteUnlockTables to be used for a dump script.
+func (d *Client) WriteUnlockTables(w io.Writer) {
 	fmt.Fprintln(w, "UNLOCK TABLES;")
 }
 
-func (d *mySQL) selectAllDataFor(table string) (rows *sql.Rows, columns []string, err error) {
-	var selectQuery string
-	if selectQuery, err = d.GetSelectQueryFor(table); err != nil {
-		return
+// Helper function to get all data for a table.
+func (d *Client) selectAllDataFor(table string) (*sql.Rows, []string, error) {
+	query, err := d.GetSelectQueryForTable(table)
+	if err != nil {
+		return nil, nil, err
 	}
-	if rows, err = d.DB.Query(selectQuery); err != nil {
-		return
+
+	rows, err := d.DB.Query(query)
+	if err != nil {
+		return nil, nil, err
 	}
-	if columns, err = rows.Columns(); err != nil {
-		return
+
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, nil, err
 	}
-	return
+
+	return rows, columns, nil
 }
 
-// Get the table data
-func (d *mySQL) DumpTableData(w io.Writer, table string) (err error) {
-	d.Log.Println("Dumping data for table", table)
+// WriteTableHeader which contains debug information.
+func (d *Client) WriteTableHeader(w io.Writer, table string) (uint64, error) {
+	fmt.Fprintf(w, "\n--\n-- Data for table `%s`", table)
+
+	count, err := d.GetRowCountForTable(table)
+	if err != nil {
+		return 0, err
+	}
+
+	fmt.Fprintf(w, " -- %d rows\n--\n\n", count)
+
+	return count, nil
+}
+
+// WriteTableData for a specific table.
+func (d *Client) WriteTableData(w io.Writer, table string) error {
 	rows, columns, err := d.selectAllDataFor(table)
 	if err != nil {
-		return
+		return err
 	}
+
 	defer rows.Close()
 
 	values := make([]*sql.RawBytes, len(columns))
 	scanArgs := make([]interface{}, len(values))
+
 	for i := range values {
 		scanArgs[i] = &values[i]
 	}
 
 	query := fmt.Sprintf("INSERT INTO `%s` VALUES", table)
+
 	var data []string
+
 	for rows.Next() {
 		if err = rows.Scan(scanArgs...); err != nil {
 			return err
 		}
+
 		var vals []string
+
 		for _, col := range values {
 			val := "NULL"
+
 			if col != nil {
 				val = fmt.Sprintf("'%s'", escape(string(*col)))
 			}
+
 			vals = append(vals, val)
 		}
 
 		data = append(data, fmt.Sprintf("( %s )", strings.Join(vals, ", ")))
+
+		if d.ExtendedInsertRows == 0 {
+			continue
+		}
+
 		if len(data) >= d.ExtendedInsertRows {
 			fmt.Fprintf(w, "%s\n%s;\n", query, strings.Join(data, ",\n"))
 			data = make([]string, 0)
@@ -206,45 +257,57 @@ func (d *mySQL) DumpTableData(w io.Writer, table string) (err error) {
 		fmt.Fprintf(w, "%s\n%s;\n", query, strings.Join(data, ",\n"))
 	}
 
-	return
+	return nil
 }
 
-func (d *mySQL) Dump(w io.Writer) (err error) {
-	fmt.Fprintf(w, "SET NAMES utf8;\n")
-	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 0;\n")
-
-	d.Log.Println("Getting table list...")
+// WriteTables will create a script for all tables.
+func (d *Client) WriteTables(w io.Writer) error {
 	tables, err := d.GetTables()
 	if err != nil {
-		return
+		return err
 	}
-	
+
 	for _, table := range tables {
-		if d.FilterMap[strings.ToLower(table)] != "ignore" {
-			skipData := d.FilterMap[strings.ToLower(table)] == "nodata"
-			if !skipData && d.UseTableLock {
-				d.LockTableReading(table)
-				d.FlushTable(table)
-			}
-			d.DumpCreateTable(w, table)
-			if !skipData {
-				cnt, err := d.DumpTableHeader(w, table)
-				if err != nil {
-					return err
-				}
-				if cnt > 0 {
-					d.DumpTableLockWrite(w, table)
-					d.DumpTableData(w, table)
-					fmt.Fprintln(w)
-					d.DumpUnlockTables(w)
-					if d.UseTableLock {
-						d.UnlockTables()
-					}
-				}
+		if err := d.WriteTable(w, table); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// WriteTable allows for a single table dump script.
+func (d *Client) WriteTable(w io.Writer, table string) error {
+	if d.FilterMap[strings.ToLower(table)] == OperationIgnore {
+		return nil
+	}
+
+	skipData := d.FilterMap[strings.ToLower(table)] == OperationNoData
+	if !skipData && d.UseTableLock {
+		d.LockTableReading(table)
+		d.FlushTable(table)
+	}
+
+	d.WriteCreateTable(w, table)
+
+	if !skipData {
+		cnt, err := d.WriteTableHeader(w, table)
+		if err != nil {
+			return err
+		}
+
+		if cnt > 0 {
+			d.WriteTableLockWrite(w, table)
+			d.WriteTableData(w, table)
+
+			fmt.Fprintln(w)
+
+			d.WriteUnlockTables(w)
+			if d.UseTableLock {
+				d.UnlockTables()
 			}
 		}
 	}
 
-	fmt.Fprintf(w, "SET FOREIGN_KEY_CHECKS = 1;\n")
-	return
+	return nil
 }

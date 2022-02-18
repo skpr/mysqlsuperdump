@@ -141,23 +141,16 @@ func (d *Client) GetSelectQueryForTable(table string) (string, error) {
 }
 
 // GetRowCountForTable will return the number of rows using a SELECT statement.
-func (d *Client) GetRowCountForTable(table string) (uint64, error) {
+func (d *Client) GetRowCountForTable(table string) (count uint64, err error) {
 	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`", table)
-
 	if where, ok := d.WhereMap[strings.ToLower(table)]; ok {
 		query = fmt.Sprintf("%s WHERE %s", query, where)
 	}
-
 	row := d.DB.QueryRow(query)
-
-	var count uint64
-
-	err := row.Scan(&count)
-	if err != nil {
-		return count, err
+	if err = row.Scan(&count); err != nil {
+		return
 	}
-
-	return count, nil
+	return
 }
 
 // WriteTableLockWrite to be used for a dump script.

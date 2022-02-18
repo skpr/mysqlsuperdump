@@ -142,7 +142,7 @@ func TestMySQLGetSelectQueryForHandlingError(t *testing.T) {
 	dumper.WhereMap = map[string]string{"table": "c1 > 0"}
 	error := errors.New("broken")
 	mock.ExpectQuery("SELECT \\* FROM `table` LIMIT 1").WillReturnError(error)
-	query, err := dumper.GetRowCountForTable("table")
+	query, err := dumper.GetSelectQueryForTable("table")
 	assert.Equal(t, error, err)
 	assert.Equal(t, "", query)
 }

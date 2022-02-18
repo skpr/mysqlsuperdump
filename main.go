@@ -17,15 +17,13 @@ func main() {
 
 	cfg := newConfig()
 	checkError(cfg.parseAll())
-	verbosely := cfg.getVerboseLogger()
 
-	verbosely.Println("Connecting to MySQL database at", cfg.dsn)
 	db, err := sql.Open("mysql", cfg.dsn)
 	db.SetMaxOpenConns(cfg.maxOpenConns)
 	checkError(err)
 	defer db.Close()
 
-	dumpr := dumper.NewMySQLDumper(db, verbosely)
+	dumpr := dumper.NewMySQLDumper(db)
 	dumpr.SelectMap = cfg.selectMap
 	dumpr.WhereMap = cfg.whereMap
 	dumpr.FilterMap = cfg.filterMap
@@ -36,6 +34,5 @@ func main() {
 	checkError(err)
 	defer w.Close()
 
-	verbosely.Println("Starting dump")
-	checkError(dumpr.Dump(w))
+	checkError(dumpr.WriteTables(w))
 }

@@ -1,4 +1,4 @@
-module github.com/hgfischer/mysqlsuperdump
+module github.com/skpr/mysqlsuperdump
 
 go 1.17
 

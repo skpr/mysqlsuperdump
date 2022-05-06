@@ -23,7 +23,7 @@ func main() {
 	checkError(err)
 	defer db.Close()
 
-	dumpr := dumper.NewMySQLDumper(db)
+	dumpr := dumper.NewClient(db)
 	dumpr.SelectMap = cfg.selectMap
 	dumpr.WhereMap = cfg.whereMap
 	dumpr.FilterMap = cfg.filterMap
@@ -34,5 +34,5 @@ func main() {
 	checkError(err)
 	defer w.Close()
 
-	checkError(dumpr.WriteTables(w))
+	checkError(dumpr.DumpTables(w))
 }
